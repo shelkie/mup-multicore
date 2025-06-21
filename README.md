@@ -10,6 +10,7 @@ This plugin automatically:
 3. **Sets up nginx load balancing** (optional, for web-facing servers)
 4. **Maintains MUP compatibility** - all standard MUP commands work normally
 5. **Provides environment variables** for container identification (`CORE_ID`)
+6. **Respects server filtering** - honors the `--servers` flag to deploy only to specific servers
 
 ## Why use this?
 
@@ -119,6 +120,21 @@ app: {
 }
 ```
 
+### Code Version Tracking
+
+The plugin automatically adds a code version environment variable to all containers:
+
+- `CODE_VERSION`: Package version + git commit hash (e.g., `1.3.0-a1b2c3d`)
+
+This helps you track which version of code each container is running in your dashboard. The version combines:
+- **Package version** from `package.json` (e.g., `1.3.0`)
+- **Git commit hash** (e.g., `a1b2c3d`)
+- **Format**: `{packageVersion}-{gitCommit}`
+
+**Fallback behavior:**
+- If git is not available or not a git repository: uses package version only (e.g., `1.3.0`)
+- If package.json is not available: uses ISO timestamp fallback
+
 ### In your application code:
 
 ```js
@@ -128,12 +144,43 @@ App.getWorkerId = function() {
   const coreId = process.env.CORE_ID || '0';
   return `${hostname}-core-${coreId}`;
 };
+
+// Get deployment information
+App.getDeployInfo = function() {
+  let codeVersion = process.env.CODE_VERSION;
+  
+  // If CODE_VERSION not set, try to get it from package.json
+  if (!codeVersion) {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const packagePath = path.join(process.cwd(), 'package.json');
+      const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+      codeVersion = packageJson.version;
+    } catch (error) {
+      console.log('⚠️ Could not get CODE_VERSION from env or package.json');
+      codeVersion = 'unknown';
+    }
+  }
+  
+  // Parse version components
+  const hasGitCommit = codeVersion && codeVersion.includes('-');
+  const packageVersion = hasGitCommit ? codeVersion.split('-')[0] : codeVersion;
+  const gitCommit = hasGitCommit ? codeVersion.split('-')[1] : null;
+  
+  return {
+    coreId: process.env.CORE_ID || '0',
+    codeVersion: codeVersion,
+    packageVersion: packageVersion, // "1.3.0" or full version if no git
+    gitCommit: gitCommit,           // "a1b2c3d" or null if no git
+    hostname: os.hostname()
+  };
+};
 ```
 
 This generates IDs like:
-- Main container: `www1-myapp-core-0`
-- Worker 1: `www1-myapp-1-core-1`
-- Worker 2: `www1-myapp-2-core-2`
+- **With git**: `www1-myapp-core-0` (code version: 1.3.0-a1b2c3d)
+- **Without git**: `www1-myapp-core-0` (code version: 1.3.0)
 
 ## Usage
 
@@ -148,6 +195,19 @@ mup stop      # Stops main + workers
 mup restart   # Restarts main + workers
 mup logs      # Shows main container logs
 ```
+
+### Server Filtering
+
+The plugin respects MUP's `--servers` flag to deploy to specific servers only:
+
+```bash
+mup deploy --servers=app1           # Deploy only to app1 server
+mup deploy --servers=app1,app2      # Deploy to app1 and app2 servers  
+mup start --servers=web1            # Start workers only on web1
+mup stop --servers=worker1,worker2  # Stop workers only on worker1 and worker2
+```
+
+This ensures that when you specify `--servers=app1`, worker containers are only started on the `app1` server, not on all servers in your configuration.
 
 ### Plugin-Specific Commands
 
@@ -221,4 +281,4 @@ You should see:
 
 ## Performance Impact
 
-On a 4-core server, you should see ~4x improvement in CPU-intensive tasks compared to a single container deployment. 
+On a 4-core server, you should see ~4x improvement in CPU-intensive tasks compared to a single container deployment.
